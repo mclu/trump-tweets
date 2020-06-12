@@ -1,0 +1,248 @@
+---
+title: "STATS 503 Group Project"
+subtitle: "How will the Trump tweets affect daily stock prices?"
+author: "Group 14 - Xiaolin Cao, Ting-Wei Lin, Ming-Chen Lu, Suzy McTaggart"
+date: "`r format.Date(Sys.Date(), '%B %d, %Y')`"
+geometry: "left = 2cm, right = 2cm, top = 2cm, bottom = 2cm"
+output: 
+  html_document:
+    code_folding: hide
+    toc: no
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, echo = F, warning = FALSE, 
+                      result = "asis")
+```
+
+```{r tweets}
+# Library
+library(tidyverse)
+theme_set(theme_bw())
+
+# Read in data
+setwd("/Users/Amy/Desktop/Stat503/group_proj")
+tweets = read.csv("./data/trumptweets_original.csv")
+col = c("content", "date", "retweets", "favorites")
+tweets = tweets[col]
+tweets$day = as.Date(tweets$date, format = "%Y-%m-%d")
+new_id = data.frame(day = unique(tweets$day), new_id = 1:length(unique(tweets$day)))
+tweets = inner_join(new_id, tweets, by = "day")
+```
+
+# Data Exploration
+
+1. What time of day the tweets occur?
+
+```{r , dependson = "tweets"}
+library(lubridate)
+library(scales)
+tweets %>%
+  count(hour = hour(date)) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(x = hour, y = percent)) +
+  geom_line() +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = "Hour of day (EST)",
+       y = "% of tweets")
+```
+
+# Data Preprocessing
+Difference in the *content*?
+
+Dividing into individual words using the `unnest_tokens` function (see [this vignette](https://cran.r-project.org/web/packages/tidytext/vignettes/tidytext.html) for more), and removing some common "stopwords"[^regex].
+
+```{r tweet_words, dependson = "tweets"}
+library(tidytext)
+
+reg <- "([^A-Za-z\\d#@']|'(?![A-Za-z\\d#@]))"
+tweets_words = tweets %>%
+  mutate(
+    text = str_remove_all(content,
+                          "https?://[A-Za-z\\d///.]+|[//\\d]+|\"+|/<+|/>+|//.+&amp+")
+    ) %>%
+  unnest_tokens(word, text, token = "regex", pattern = reg) %>%
+  filter(!word %in% stop_words$word, str_detect(word, "[a-z]"))
+```
+
+What were the most common words in Trump's tweets overall?
+
+```{r tweets_words_plot, dependson = "tweets_words", fig.height = 6, fig.width = 8, echo = FALSE}
+tweets_words %>%
+  count(word, sort = TRUE) %>%
+  head(25) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n, fill = word)) +
+  geom_bar(stat = "identity") + guides(fill = FALSE) +
+  ylab("Occurrences") + coord_flip()
+```
+
+A few observations:
+
+# Sentiment Analysis
+
+We'll work with the [NRC Word-Emotion Association](http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm) lexicon, available from the tidytext package, which associates words with 10 sentiments: **positive**, **negative**, **anger**, **anticipation**, **disgust**, **fear**, **joy**, **sadness**, **surprise**, and **trust**.
+
+Count the number of words in each category:
+
+```{r sentiment, dependson = "tweets_words"}
+lexicon = get_sentiments("nrc")
+word_sentiment = tweets_words %>%
+  select(-content) %>%
+  inner_join(lexicon, by = "word") %>%
+  count(sentiment, new_id) %>%
+  ungroup() %>%
+  complete(sentiment, new_id, fill = list(n = 0))
+
+# temp = word_sentiment %>% pivot_wider(names_from = sentiment, values_from = n) %>%
+#   mutate(sentiment = NULL)
+# if(temp$negative > temp$positive) {
+#   temp['sentiment'] = -1
+# } else if (temp$negative < temp$positive) {
+#   temp['sentiment'] = 1
+# } else {
+#   temp['sentiment'] = 0
+# }
+```
+
+```{r pos/neg, dependson = "word_sentiment"}
+# Sentiment Overview
+word_sentiment %>%
+  filter(sentiment == c("positive", "negative")) %>%
+  drop_na() %>%
+  group_by(sentiment) %>%
+  summarise(m = mean(n)) %>%
+  ggplot(aes(sentiment, m, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  guides(fill=FALSE) + ylab("Average Counts")
+```
+
+Trump's tweets generally tend toward positivism. On average, there are 10.2 words identified as negative and 15.3 words identified as positive in one single tweet.
+
+**Note: Twitter limits its length to 280 characters. 280 characters is about 55 words if you use 5.1 words as the average word length.**
+
+```{r emotion, dependson = "word_sentiment"}
+word_sentiment %>%
+  filter(sentiment != "positive" & sentiment != "negative") %>%
+  group_by(sentiment) %>%
+  summarise(m = mean(n)) %>%
+  ggplot(aes(sentiment, m, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  guides(fill=FALSE) + ylab("Average Counts")
+```
+
+Words associated with **trust** have the highest frequency of occurrence, followed by **anticipation**, **joy**, and then **surprise** and **anger**.
+This word association seems to correspond to the public image of Trump from the media.
+
+```{r, dependson = "word_sentiment"}
+word_sentiment %>%
+  pivot_wider(names_from = "sentiment", values_from = n) %>%
+  mutate(sentiment = positive - negative) %>%
+  ggplot(aes(new_id, sentiment)) +
+  geom_col(show.legend = FALSE)
+```
+
+## Most common positive and negative words
+
+```{r pos/neg words, dependson = "tweets_words", fig.height=10}
+tweets_words %>%
+  select(-content) %>%
+  inner_join(lexicon, by = "word") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  group_by(sentiment) %>% 
+  top_n(15) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, ncol = 2, scales = "free_y") +
+  labs(y = "Contribution to sentiment",
+       x = NULL) +
+  coord_flip()
+```
+
+## word correlation?
+
+# Classifier Learning
+```{r, dependson = "word_sentiment"}
+score = read.csv("https://github.com/mclu/503-project/raw/master/grouped_date_new.csv")
+stock = read.csv("https://github.com/mclu/503-project/raw/master/sp_indicator.csv")
+
+# score plot
+
+score %>%
+  ggplot(aes(new_id, ss_compound)) +
+  geom_histogram()
+
+
+word_wide = word_sentiment %>%
+  pivot_wider(names_from = "sentiment", values_from = n)
+
+names(stock)[2] = 'date'
+df = inner_join(score[,-2], stock[,c(2,7,9,10)])
+df$delta_day1 = as.factor(df$delta_day1)
+
+df = left_join(df, word_wide, by = "new_id") %>% drop_na()
+
+# random forest
+library(randomForest)
+set.seed(1)
+rf_bag = randomForest(delta_day1 ~ ss_compound + retweets + favorites +
+                        Adj.Close + anger + anticipation + disgust + fear +
+                        joy + sadness + surprise + trust, 
+                      data = df, mtry = ncol(df) - 1, 
+                      importance = TRUE, ntree = 500)
+rf_bag
+varImpPlot(rf_bag)
+```
+
+
+```{r, eval=F, include=F}
+score = read.csv("https://github.com/mclu/503-project/raw/master/grouped_date_new.csv")
+stock = read.csv("https://github.com/mclu/503-project/raw/master/sp_indicator.csv")
+
+# Merge score and stock
+names(stock)[2] = 'date'
+df = inner_join(score[,-c(2,3)], stock[,c(2,7,9,10)])
+df$delta_day1 = as.factor(df$delta_day1)
+
+# Split the data
+n = floor(nrow(df)*.7)
+train = df[c(1:n),]
+test = df[-c(1:n),]
+
+# Plot sentiment score of tweets
+#ggplot(df, aes(x = date, y = ss_compound, group = 1)) + geom_line()
+
+# Naive Bayes
+library(e1071)
+train$retweets = scale(train$retweets)
+NB = naiveBayes(delta_day1 ~ ss_compound + retweets + favorites,
+                data = train)
+print(NB)
+
+pred_train = predict(NB, newdata = train)
+mean(pred_train != train$delta_day1)
+
+# Random Forest
+library(randomForest)
+set.seed(1)
+rf_bag = randomForest(delta_day1 ~ ss_compound + retweets + favorites, 
+                      data = train, mtry = ncol(train) - 1, 
+                      importance = TRUE, ntree = 500)
+rf_bag
+pred = predict(rf_bag, newdata = test)
+table(pred, test$delta_day1)
+
+```
+
+
+# References
+- Sentiment analysis of Trump's tweets with R https://blog.revolutionanalytics.com/2016/08/sentiment-analysis-of-trumps-tweets-with-r.html
+
+- https://github.com/dgrtwo/dgrtwo.github.com/blob/master/_R/2016-08-09-trump-tweets.Rmd
+
+- https://medium.com/@tomyuz/a-sentiment-analysis-approach-to-predicting-stock-returns-d5ca8b75a42
+
+
+
